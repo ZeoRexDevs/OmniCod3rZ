@@ -1,0 +1,63 @@
+name: "Shared Script Bootstrap"
+description: "Shallow-clones the shared script repository into /data/scripts after /data is maximized."
+inputs:
+  pinned-rev:
+    description: "Optional commit from the prepare job; other jobs fetch the exact same script revision."
+    required: false
+    default: ""
+outputs:
+  rev:
+    description: "Commit SHA of the external script repository."
+    value: ${{ steps.clone.outputs.rev }}
+runs:
+  using: composite
+  steps:
+    - name: "📦 Shallow-clone shared scripts into /data/scripts"
+      id: clone
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        echo "::group::📦 shared script repository bootstrap"
+        trap 'echo "::endgroup::"' EXIT
+        : "${VapourScriptAddr:?Set repository variable VAPOUR_SCRIPT_ADDR (exposed as VapourScriptAddr).}"
+        test -f /data/.maximized.lock || {
+          echo "[!] /data/.maximized.lock must exist before cloning the scripts repository." >&2
+          exit 1
+        }
+        command -v git >/dev/null 2>&1 || {
+          echo "[!] git is required to shallow-clone VapourScriptAddr." >&2
+          exit 1
+        }
+
+        # The lock serializes any future bootstrap use on a shared/self-hosted runner.
+        exec 9<>/data/.maximized.lock
+        flock 9
+
+        if [[ -d /data/scripts ]]; then
+          chmod -R u+w /data/scripts 2>/dev/null || true
+          rm -rf /data/scripts
+        fi
+
+        git clone --depth 1 --single-branch "${VapourScriptAddr}" /data/scripts
+        actualRev="$(git -C /data/scripts rev-parse HEAD)"
+        expectedRev='${{ inputs.pinned-rev }}'
+
+        # Matrix and downstream jobs use the prepare job's commit, not a moving Gist HEAD.
+        if [[ -n "${expectedRev}" && "${actualRev}" != "${expectedRev}" ]]; then
+          echo "[i] Gist HEAD moved; fetching prepared commit ${expectedRev}."
+          git -C /data/scripts fetch --depth 1 origin "${expectedRev}"
+          git -C /data/scripts checkout --detach "${expectedRev}"
+          actualRev="$(git -C /data/scripts rev-parse HEAD)"
+        fi
+        if [[ -n "${expectedRev}" && "${actualRev}" != "${expectedRev}" ]]; then
+          echo "[!] Script revision mismatch: expected ${expectedRev}, got ${actualRev}." >&2
+          exit 1
+        fi
+
+        test -s /data/scripts/x99.scriptPatcher.sh
+        test -s /data/scripts/x95.pipeline.py
+        chmod -R a-w /data/scripts
+        echo "rev=${actualRev}" >> "${GITHUB_OUTPUT}"
+        echo "[+] VapourScriptAddr revision ${actualRev} is available at /data/scripts"
+        find /data/scripts -maxdepth 1 -type f -printf '%f\n' | sort

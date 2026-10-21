@@ -1,0 +1,31 @@
+name: Workflow Logs Cleaner
+
+on:
+  schedule:
+    # Runs at 01:01 UTC on the 2nd of every month.
+    - cron: '1 1 2 * *'
+  workflow_dispatch:
+    inputs:
+      runs_older_than:
+        description: "Last X Days' Logs To Keep"
+        default: "12"
+        required: false
+        type: string
+
+env:
+  SCHEDULED_RUNS_OLDER_THAN: "12"
+
+permissions:
+  actions: write
+
+jobs:
+  clean-logs:
+    name: "🧹 Clean old workflow run logs"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "🧹 Remove workflow logs older than the retention window"
+        uses: igorjs/gh-actions-clean-workflow@v7
+        with:
+          # GH_TOKEN is the shared elevated token used by this repository's workflows.
+          token: ${{ secrets.GH_TOKEN }}
+          runs_older_than: ${{ github.event.inputs.runs_older_than || env.SCHEDULED_RUNS_OLDER_THAN }}

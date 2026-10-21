@@ -1,0 +1,88 @@
+name: getScene
+run-name: "🎬 SceneDetect — ${{ inputs.ShowName }} @ ${{ inputs.EpLabels }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ShowName:
+        description: "Title key from scripts/x01.showList.txt"
+        required: true
+        type: string
+      EpLabels:
+        description: "One or more labels separated by '+', e.g. S01E01+S01E02 or EpFull"
+        required: true
+        type: string
+        default: "S01E01"
+      CustomEnvs:
+        description: "Optional pipe-separated overrides, e.g. minSCLenth=36|Probe=false|SCDebug=true"
+        required: false
+        type: string
+        default: ""
+
+env:
+  StateZ: SCD
+  ShowName: ${{ inputs.ShowName }}
+  EpLabels: ${{ inputs.EpLabels }}
+  CustomEnvs: ${{ inputs.CustomEnvs }}
+  RCLONE_CONFIG_HASH: ${{ secrets.RCLONE_CONFIG_HASH }}
+  VapourScriptAddr: ${{ vars.VAPOUR_SCRIPT_ADDR }}
+  PrimaryGDriveRoot: "ms365:"
+  SecondaryGDriveRoot: "gdrive_2tb:"
+  VapourDockerImage: "fr3akyphantom/architect-v3"
+  SafeDockerTag: latest
+
+jobs:
+  get-scene:
+    name: "🔎 Detect scenes and split FFV1"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - name: "🧹 Maximize runner space and prepare /data"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This copy is available from the workflow checkout before /data is mounted.
+          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
+          test -f /data/.maximized.lock
+      - name: "🧰 Install host utilities"
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
+          mkdir -p /data/app/tmp /data/app/videos
+          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
+      - name: "📦 Bootstrap scripts"
+        uses: ./.github/actions/vapour-bootstrap
+      - name: "🧩 Apply custom environment overrides"
+        if: env.CustomEnvs != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r item; do
+            [[ -z "${item}" || "${item}" != *=* ]] && continue
+            key="${item%%=*}"; value="${item#*=}"
+            [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "[!] Invalid environment key: ${key}" >&2; exit 1; }
+            [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || { echo "[!] Newlines are not allowed in custom environment values." >&2; exit 1; }
+            printf '%s=%s\n' "${key}" "${value}" >> "${GITHUB_ENV}"
+          done < <(printf '%s' "${CustomEnvs}" | tr '|' '\n')
+      - name: "🔐 Configure rclone remotes"
+        run: bash /data/scripts/x00.rcloneSetup.sh
+      - name: "🐳 Login and prepare architect-v3 runtime"
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: "🐳 Pull the pinned v5o runtime image tag"
+        run: |
+          docker pull --platform linux/amd64 "${VapourDockerImage}:${SafeDockerTag}"
+      - name: "🐳 Start the scene-detection container"
+        working-directory: /data
+        env:
+          jobIdentifier: scdetector
+        run: bash /data/scripts/x53.dockerPrep.sh
+      - name: "🎞️ Detect scenes, reuse the LWLibavSource cache, and upload scene chunks"
+        working-directory: /data
+        run: bash /data/scripts/x09.sceneDetector.sh

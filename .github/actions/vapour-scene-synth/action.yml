@@ -1,0 +1,41 @@
+name: "Vapour v5o Scene Synth"
+description: "Processes up to five scene IDs from one matrix cell; scene errors are collected and recovered by the verifier/retry matrix."
+inputs:
+  scene-group:
+    description: "Scene IDs joined by '+' (maximum five IDs)."
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: "🎬 Encode and score this scene group"
+      id: synth
+      shell: bash
+      working-directory: /data
+      env:
+        SCENE_GROUP: ${{ inputs.scene-group }}
+      run: |
+        set -uo pipefail
+        IFS='+' read -r -a sceneIds <<< "${SCENE_GROUP}"
+        if (( ${#sceneIds[@]} < 1 || ${#sceneIds[@]} > 5 )); then
+          echo "[!] This matrix cell must contain 1–5 scene IDs; got ${#sceneIds[@]}." >&2
+          exit 1
+        fi
+        failed=()
+        for sceneId in "${sceneIds[@]}"; do
+          [[ "${sceneId}" =~ ^[0-9]{1,4}$ ]] || { echo "[!] Invalid scene ID: ${sceneId}" >&2; failed+=("${sceneId}"); continue; }
+          sceneId="$(printf '%04d' "$((10#${sceneId}))")"
+          echo "::group::🎞️ Scene ${sceneId}"
+          if bash /data/scripts/x80.sceneWorker.sh "${sceneId}"; then
+            echo "[+] Scene ${sceneId} completed or was already present."
+          else
+            code=$?
+            echo "[!] Scene ${sceneId} failed with exit code ${code}; continuing with the rest of this group." >&2
+            failed+=("${sceneId}")
+          fi
+          echo "::endgroup::"
+        done
+        joined="$(IFS=+; echo "${failed[*]}")"
+        echo "failed-scenes=${joined}" >> "${GITHUB_OUTPUT}"
+        if (( ${#failed[@]} > 0 )); then
+          echo "[!] Failed scenes will be determined from remote outputs and retried by a later matrix."
+        fi

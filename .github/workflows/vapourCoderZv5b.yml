@@ -1,0 +1,75 @@
+name: vapourCoderZv5b
+
+run-name: "v5b optimized final - ${{ inputs.Encod3r }} P${{ inputs.EncPreset }} Q${{ inputs.QScale }} - ${{ inputs.EpLabel }} ${{ inputs.ShowName }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ShowName:
+        description: "Show key from scripts/x01.showList.txt, or a compatible custom title"
+        required: true
+        type: string
+      EpLabel:
+        description: "Episode label such as S01E01 or EpFull"
+        required: true
+        type: string
+        default: "S01E01"
+      Encod3r:
+        description: "Encoder binary family"
+        required: true
+        type: choice
+        options: ["SVT", "AOM", "265"]
+        default: "SVT"
+      EncPreset:
+        description: "Keep the same encoder preset for all four v5a sample runs"
+        required: true
+        type: string
+        default: "4"
+      QScale:
+        description: "Trial QScale/CRF; use four distinct values for v5a, then the same base QScale path for v5b"
+        required: true
+        type: number
+        default: 35
+      VidRes:
+        description: "Output height (720p/1080p) or explicit WxH (1280x720)"
+        required: true
+        type: string
+        default: "720p"
+      TargetQuality:
+        description: "Target per-scene SSIMU2 score (used by v5a optimizer)"
+        required: false
+        type: number
+        default: 70
+      ForceRecode:
+        description: "Force re-encoding even when encoded scene already exists"
+        required: false
+        type: boolean
+        default: false
+      CustomEnvs:
+        description: "Optional pipe-separated KEY=VALUE overrides, e.g. FILTER=false|DENOISE=false"
+        required: false
+        type: string
+      ScoreMethod:
+        description: "Per-scene score implementation available in architect-v3"
+        required: false
+        type: choice
+        options: ["vszip", "v2_zig"]
+        default: "vszip"
+
+jobs:
+  v5b:
+    name: "🎯 Per-scene optimized encode, score, and merge"
+    uses: ./.github/workflows/vapourCore.yml
+    with:
+      ShowName: ${{ inputs.ShowName }}
+      EpLabel: ${{ inputs.EpLabel }}
+      Mode: "final"
+      Encod3r: ${{ inputs.Encod3r }}
+      EncPreset: ${{ inputs.EncPreset }}
+      QScale: ${{ inputs.QScale }}
+      VidRes: ${{ inputs.VidRes }}
+      TargetQuality: ${{ inputs.TargetQuality }}
+      ForceRecode: ${{ inputs.ForceRecode }}
+      CustomEnvs: ${{ inputs.CustomEnvs }}
+      ScoreMethod: ${{ inputs.ScoreMethod }}
+    secrets: inherit
