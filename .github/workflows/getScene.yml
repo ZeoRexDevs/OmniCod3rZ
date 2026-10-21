@@ -39,45 +39,40 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: "🧹 Maximize runner space and prepare /data"
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This copy is available from the workflow checkout before /data is mounted.
-          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
-          test -f /data/.maximized.lock
-      - name: "🧰 Install host utilities"
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
-          mkdir -p /data/app/tmp /data/app/videos
-          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
-      - name: "📦 Bootstrap scripts"
-        uses: ./.github/actions/vapour-bootstrap
-      - name: "🧩 Apply custom environment overrides"
-        if: env.CustomEnvs != ''
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r item; do
-            [[ -z "${item}" || "${item}" != *=* ]] && continue
-            key="${item%%=*}"; value="${item#*=}"
-            [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "[!] Invalid environment key: ${key}" >&2; exit 1; }
-            [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || { echo "[!] Newlines are not allowed in custom environment values." >&2; exit 1; }
-            printf '%s=%s\n' "${key}" "${value}" >> "${GITHUB_ENV}"
-          done < <(printf '%s' "${CustomEnvs}" | tr '|' '\n')
+      - name: "🧰 Prepare runner and clone shared scripts"
+        uses: ./.github/actions/vapour-runner-setup
       - name: "🔐 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
-      - name: "🐳 Login and prepare architect-v3 runtime"
+      - name: "📥 Reuse a previous runtime artifact when runID4localVS is supplied"
+        if: env.runID4localVS != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: localVS
+          path: /data/
+          github-token: ${{ secrets.GH_TOKEN }}
+          run-id: ${{ env.runID4localVS }}
+      - name: "🐳 Restore previous runtime cache when present"
+        id: runtime_cache
+        run: bash /data/scripts/x54.runtimeCache.sh restore
+      - name: "🐳 Login to Docker Hub"
+        if: steps.runtime_cache.outputs.loaded != 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: "🐳 Pull the pinned v5o runtime image tag"
-        run: |
-          docker pull --platform linux/amd64 "${VapourDockerImage}:${SafeDockerTag}"
+      - name: "🐳 Pull runtime image only when cache is unavailable"
+        if: steps.runtime_cache.outputs.loaded != 'true'
+        run: docker pull --platform linux/amd64 "${VapourDockerImage}:${SafeDockerTag}"
+      - name: "📦 Save runtime image for reuse by later runs"
+        run: bash /data/scripts/x54.runtimeCache.sh save
+      - name: "📤 Upload runtime cache artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: localVS
+          path: /data/localVS.tar.gz
+          retention-days: 6
+          compression-level: 0
       - name: "🐳 Start the scene-detection container"
         working-directory: /data
         env:

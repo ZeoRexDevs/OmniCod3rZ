@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       Mode:
-        description: "sample = v5a quantizer trial; final = optimized v5b encode and merge"
+        description: "sample = quality-curve trial; final = optimized encode and merge"
         required: true
         type: string
       Encod3r:
@@ -48,6 +48,9 @@ on:
         required: true
       RCLONE_CONFIG_HASH:
         required: true
+      GH_TOKEN:
+        description: "Shared elevated token, including permission to download artifacts from a prior run."
+        required: true
 
 env:
   ShowName: ${{ inputs.ShowName }}
@@ -62,6 +65,7 @@ env:
   ForceRecode: ${{ inputs.ForceRecode }}
   CustomEnvs: ${{ inputs.CustomEnvs }}
   SCORE_METHOD: ${{ inputs.ScoreMethod }}
+  GH_TOKEN: ${{ secrets.GH_TOKEN }}
   RCLONE_CONFIG_HASH: ${{ secrets.RCLONE_CONFIG_HASH }}
   VapourScriptAddr: ${{ vars.VAPOUR_SCRIPT_ADDR }}
   PrimaryGDriveRoot: "ms365:"
@@ -84,58 +88,67 @@ jobs:
       SourceWidth: ${{ steps.meta.outputs.SourceWidth }}
       framerate: ${{ steps.meta.outputs.framerate }}
       streamdar: ${{ steps.meta.outputs.streamdar }}
-      scriptRev: ${{ steps.bootstrap.outputs.rev }}
+      scriptRev: ${{ steps.runner_setup.outputs.rev }}
     steps:
       - name: "📥 Checkout workflow revision"
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: "🧹 Maximize runner space and prepare /data"
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This copy is available from the workflow checkout before /data is mounted.
-          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
-          test -f /data/.maximized.lock
-      - name: "🧰 Install host utilities"
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
-          mkdir -p /data/app/tmp /data/app/videos
-          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
-      - name: "📦 Bootstrap revision-pinned scripts"
-        id: bootstrap
-        uses: ./.github/actions/vapour-bootstrap
-      - name: "🧩 Apply validated environment overrides"
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r item; do
-            [[ -z "$item" || "$item" != *=* ]] && continue
-            key="${item%%=*}"; value="${item#*=}"
-            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "[!] Invalid environment key: $key" >&2; exit 1; }
-            [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || { echo "[!] Multi-line env values are unsupported" >&2; exit 1; }
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
-          done < <(printf '%s' "$CustomEnvs" | tr '|' '\n')
+      - name: "🧰 Prepare runner and install revision-pinned shared scripts"
+        id: runner_setup
+        uses: ./.github/actions/vapour-runner-setup
       - name: "🔐 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
       - name: "🧭 Resolve remote paths"
         working-directory: /data
         run: source /data/scripts/x99.scriptPatcher.sh
-      - name: "📥 Fetch scene manifest from Secondary GDrive"
+      - name: "📥 Reuse a previous scene-manifest artifact when runID4SCArt is supplied"
+        if: env.runID4SCArt != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: scenejson
+          path: /data/app/tmp/previous-scene
+          github-token: ${{ secrets.GH_TOKEN }}
+          run-id: ${{ env.runID4SCArt }}
+      - name: "📥 Reuse a previous zonefile artifact when runID4ZFile is supplied"
+        if: env.runID4ZFile != '' && inputs.Mode == 'final'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: Zonefile
+          path: /data/app/tmp/previous-zone
+          github-token: ${{ secrets.GH_TOKEN }}
+          run-id: ${{ env.runID4ZFile }}
+      - name: "📥 Fetch scene manifest from Secondary GDrive or a previous artifact"
         working-directory: /data
         run: |
           set -euo pipefail
-          rclone copyto "${SceneDataPath}/${SceneJsonFile}" /data/app/tmp/scenes.raw.json --retries 8 --retries-sleep 1s
+          previousScene=""
+          for candidate in /data/app/tmp/previous-scene/scenejson /data/app/tmp/previous-scene/scenes.json /data/app/tmp/previous-scene/*.json; do
+            if [[ -s "${candidate}" ]]; then previousScene="${candidate}"; break; fi
+          done
+          if [[ -n "${previousScene}" ]]; then
+            cp "${previousScene}" /data/app/tmp/scenes.raw.json
+            echo "[+] Reused manifest artifact from run ${runID4SCArt}."
+          else
+            rclone copyto "${SceneDataPath}/${SceneJsonFile}" /data/app/tmp/scenes.raw.json --retries 8 --retries-sleep 1s
+          fi
           [[ -s /data/app/tmp/scenes.raw.json ]]
           source <(python3 /data/scripts/x95.pipeline.py manifest-env --scene-json /data/app/tmp/scenes.raw.json --vid-res "${VidRes}")
           if [[ "${PipelineMode}" == "final" ]]; then
             zoneRoot="${ZoneDataPath}/${VidResH}p/${FilterProfile}${filterPostfix}/${SCORE_METHOD}/${Encod3r}/P${EncPreset}"
             mkdir -p /data/app/tmp/baseline
             rclone copyto "${zoneRoot}/${ShowName}.${EpLabel}.scenes.optimized.json" /data/app/tmp/scenes.json --retries 8 --retries-sleep 1s
-            rclone copyto "${zoneRoot}/${ShowName}.${EpLabel}.zonefile.txt" /data/app/tmp/optimized.zonefile.txt --retries 8 --retries-sleep 1s
+            previousZone=""
+            for candidate in /data/app/tmp/previous-zone/Zonefile /data/app/tmp/previous-zone/*.txt; do
+              if [[ -s "${candidate}" ]]; then previousZone="${candidate}"; break; fi
+            done
+            if [[ -n "${previousZone}" ]]; then
+              cp "${previousZone}" /data/app/tmp/optimized.zonefile.txt
+            else
+              rclone copyto "${zoneRoot}/${ShowName}.${EpLabel}.zonefile.txt" /data/app/tmp/optimized.zonefile.txt --retries 8 --retries-sleep 1s
+            fi
             cp /data/app/tmp/scenes.json /data/app/tmp/baseline/scenes.optimized.json
           else
             cp /data/app/tmp/scenes.raw.json /data/app/tmp/scenes.json
@@ -146,46 +159,62 @@ jobs:
         run: |
           set -euo pipefail
           python3 /data/scripts/x95.pipeline.py manifest-env --scene-json /data/app/tmp/scenes.json --vid-res "${VidRes}" | tee -a "$GITHUB_ENV" | tee -a "$GITHUB_OUTPUT"
-      - name: "🧮 Build the scene matrix (max five scenes per job)"
+      - name: "🧮 Build the scene matrix with x23 (max five scenes per job)"
         id: matrix
         working-directory: /data
-        run: |
-          set -euo pipefail
-          matrix="$(python3 /data/scripts/x95.pipeline.py matrix --scene-json /data/app/tmp/scenes.json --group-size "${SCENE_GROUP_SIZE}")"
-          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
-          echo "[+] Matrix: ${matrix}"
-      - name: "🐳 Login and cache architect-v3 image"
+        run: bash /data/scripts/x23.matrixGenZ.sh /data/app/tmp/scenes.json
+      - name: "📥 Reuse a previous runtime artifact when runID4localVS is supplied"
+        if: env.runID4localVS != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: localVS
+          path: /data/
+          github-token: ${{ secrets.GH_TOKEN }}
+          run-id: ${{ env.runID4localVS }}
+      - name: "🐳 Load cached image/container filesystem if available"
+        id: runtime_cache
+        shell: bash
+        run: bash /data/scripts/x54.runtimeCache.sh restore
+      - name: "🐳 Login to Docker Hub"
+        if: steps.runtime_cache.outputs.loaded != 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: "🐳 Pull x86_64_v3-compatible runtime and save artifact"
-        run: |
-          set -euo pipefail
-          docker pull --platform linux/amd64 "${VapourDockerImage}:${SafeDockerTag}"
-          mkdir -p /data/app/tmp
-          docker save "${VapourDockerImage}:${SafeDockerTag}" | gzip -1 > /data/app/tmp/runtime-image.tar.gz
-          test -s /data/app/tmp/runtime-image.tar.gz
+      - name: "🐳 Pull runtime only when previous cache is unavailable"
+        if: steps.runtime_cache.outputs.loaded != 'true'
+        run: docker pull --platform linux/amd64 "${VapourDockerImage}:${SafeDockerTag}"
+      - name: "📦 Save normalized runtime image archive"
+        shell: bash
+        run: bash /data/scripts/x54.runtimeCache.sh save
       - name: "📤 Upload revision-pinned scene manifests"
         uses: actions/upload-artifact@v4
         with:
-          name: v5o-scenes
+          name: scene-manifest
           path: /data/app/tmp/scenes.json
           retention-days: 3
           compression-level: 0
       - name: "📤 Upload original scene manifest"
         uses: actions/upload-artifact@v4
         with:
-          name: v5o-scenes-raw
+          name: scene-manifest-raw
           path: /data/app/tmp/scenes.raw.json
           retention-days: 3
           compression-level: 0
       - name: "📤 Cache runtime Docker image as workflow artifact"
         uses: actions/upload-artifact@v4
         with:
-          name: v5o-runtime-image
+          name: runtime-image
           path: /data/app/tmp/runtime-image.tar.gz
           retention-days: 1
+          compression-level: 0
+      - name: "📤 Keep runtime cache for reuse by later runs"
+        uses: actions/upload-artifact@v4
+        with:
+          name: localVS
+          path: /data/localVS.tar.gz
+          retention-days: 6
           compression-level: 0
 
   encode:
@@ -202,45 +231,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: "🧹 Maximize runner space and prepare /data"
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This copy is available from the workflow checkout before /data is mounted.
-          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
-          test -f /data/.maximized.lock
-      - name: "🧰 Install host utilities"
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
-          mkdir -p /data/app/tmp /data/app/videos
-          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
-      - name: "📦 Bootstrap scripts at the exact prepare revision"
-        uses: ./.github/actions/vapour-bootstrap
+      - name: "🧰 Prepare runner with the pinned shared script revision"
+        uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
-      - name: "🧩 Apply validated environment overrides"
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r item; do
-            [[ -z "$item" || "$item" != *=* ]] && continue
-            key="${item%%=*}"; value="${item#*=}"
-            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "[!] Invalid environment key: $key" >&2; exit 1; }
-            [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || exit 1
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
-          done < <(printf '%s' "$CustomEnvs" | tr '|' '\n')
       - name: "📥 Download scene manifests"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes
+          name: scene-manifest
           path: /data/app/tmp
       - name: "📥 Download original scene manifest"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes-raw
+          name: scene-manifest-raw
           path: /data/app/tmp
       - name: "🔐 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
@@ -252,19 +255,66 @@ jobs:
       - name: "📥 Download cached runtime image"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-runtime-image
-          path: /tmp/v5o-runtime-cache
+          name: runtime-image
+          path: /tmp/runtime-image-cache
       - name: "🐳 Load cached runtime image"
-        run: gzip -dc /tmp/v5o-runtime-cache/runtime-image.tar.gz | docker load
+        run: gzip -dc /tmp/runtime-image-cache/runtime-image.tar.gz | docker load
       - name: "🐳 Start scene worker container"
         working-directory: /data
         run: source /data/scripts/x53.dockerPrep.sh
         env:
           jobIdentifier: scene-worker
-      - name: "🎬 Encode and score at most five scenes"
+      - name: "🧩 Split this scene group into individual scene steps"
+        id: scene_ids
+        shell: bash
+        env:
+          SCENE_GROUP: ${{ matrix.sceneGroup }}
+        run: |
+          set -euo pipefail
+          IFS='+' read -r -a sceneIds <<< "${SCENE_GROUP}"
+          if (( ${#sceneIds[@]} < 1 || ${#sceneIds[@]} > 5 )); then
+            echo "[!] Matrix bucket must contain 1–5 scenes; got ${#sceneIds[@]}." >&2
+            exit 1
+          fi
+          for ((slot=0; slot<5; slot++)); do
+            sceneId="${sceneIds[$slot]:-}"
+            if [[ -n "${sceneId}" ]]; then
+              [[ "${sceneId}" =~ ^[0-9]{1,4}$ ]] || { echo "[!] Invalid scene ID: ${sceneId}" >&2; exit 1; }
+              printf 'scene%s=%04d\n' "$((slot + 1))" "$((10#${sceneId}))" >> "${GITHUB_OUTPUT}"
+            else
+              printf 'scene%s=\n' "$((slot + 1))" >> "${GITHUB_OUTPUT}"
+            fi
+          done
+      - name: "🎞️ Scene ${{ steps.scene_ids.outputs.scene1 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene1 != '' }}
+        continue-on-error: true
         uses: ./.github/actions/vapour-scene-synth
         with:
-          scene-group: ${{ matrix.sceneGroup }}
+          scene-id: ${{ steps.scene_ids.outputs.scene1 }}
+      - name: "🎞️ Scene ${{ steps.scene_ids.outputs.scene2 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene2 != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/vapour-scene-synth
+        with:
+          scene-id: ${{ steps.scene_ids.outputs.scene2 }}
+      - name: "🎞️ Scene ${{ steps.scene_ids.outputs.scene3 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene3 != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/vapour-scene-synth
+        with:
+          scene-id: ${{ steps.scene_ids.outputs.scene3 }}
+      - name: "🎞️ Scene ${{ steps.scene_ids.outputs.scene4 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene4 != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/vapour-scene-synth
+        with:
+          scene-id: ${{ steps.scene_ids.outputs.scene4 }}
+      - name: "🎞️ Scene ${{ steps.scene_ids.outputs.scene5 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene5 != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/vapour-scene-synth
+        with:
+          scene-id: ${{ steps.scene_ids.outputs.scene5 }}
 
   inspect-initial:
     name: "🔍 Inspect remote scene outputs after first matrix"
@@ -279,39 +329,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: "🧹 Maximize runner space and prepare /data"
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This copy is available from the workflow checkout before /data is mounted.
-          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
-          test -f /data/.maximized.lock
-      - name: "🧰 Install host utilities"
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
-          mkdir -p /data/app/tmp /data/app/videos
-          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
-      - name: "📦 Bootstrap pinned scripts"
-        uses: ./.github/actions/vapour-bootstrap
+      - name: "🧰 Prepare runner with the pinned shared script revision"
+        uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
-      - name: "🧩 Apply validated environment overrides"
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r item; do
-            [[ -z "$item" || "$item" != *=* ]] && continue
-            key="${item%%=*}"; value="${item#*=}"
-            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 1
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
-          done < <(printf '%s' "$CustomEnvs" | tr '|' '\n')
       - name: "📥 Download the selected scene manifest"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes
+          name: scene-manifest
           path: /data/app/tmp
       - name: "📥 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
@@ -340,39 +365,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: "🧹 Maximize runner space and prepare /data"
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This copy is available from the workflow checkout before /data is mounted.
-          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
-          test -f /data/.maximized.lock
-      - name: "🧰 Install host utilities"
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
-          mkdir -p /data/app/tmp /data/app/videos
-          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
-      - name: "📦 Bootstrap pinned scripts"
-        uses: ./.github/actions/vapour-bootstrap
+      - name: "🧰 Prepare runner with the pinned shared script revision"
+        uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
-      - name: "🧩 Apply validated environment overrides"
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r item; do
-            [[ -z "$item" || "$item" != *=* ]] && continue
-            key="${item%%=*}"; value="${item#*=}"
-            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 1
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
-          done < <(printf '%s' "$CustomEnvs" | tr '|' '\n')
       - name: "📥 Download the selected scene manifest"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes
+          name: scene-manifest
           path: /data/app/tmp
       - name: "🔐 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
@@ -384,19 +384,66 @@ jobs:
       - name: "📥 Download cached runtime image"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-runtime-image
-          path: /tmp/v5o-runtime-cache
+          name: runtime-image
+          path: /tmp/runtime-image-cache
       - name: "🐳 Load cached runtime image"
-        run: gzip -dc /tmp/v5o-runtime-cache/runtime-image.tar.gz | docker load
+        run: gzip -dc /tmp/runtime-image-cache/runtime-image.tar.gz | docker load
       - name: "🐳 Start scene worker container"
         working-directory: /data
         run: source /data/scripts/x53.dockerPrep.sh
         env:
           jobIdentifier: scene-worker
-      - name: "🎬 Retry this original matrix bucket"
+      - name: "🧩 Split this retry bucket into individual scene steps"
+        id: scene_ids
+        shell: bash
+        env:
+          SCENE_GROUP: ${{ matrix.sceneGroup }}
+        run: |
+          set -euo pipefail
+          IFS='+' read -r -a sceneIds <<< "${SCENE_GROUP}"
+          if (( ${#sceneIds[@]} < 1 || ${#sceneIds[@]} > 5 )); then
+            echo "[!] Matrix bucket must contain 1–5 scenes; got ${#sceneIds[@]}." >&2
+            exit 1
+          fi
+          for ((slot=0; slot<5; slot++)); do
+            sceneId="${sceneIds[$slot]:-}"
+            if [[ -n "${sceneId}" ]]; then
+              [[ "${sceneId}" =~ ^[0-9]{1,4}$ ]] || { echo "[!] Invalid scene ID: ${sceneId}" >&2; exit 1; }
+              printf 'scene%s=%04d\n' "$((slot + 1))" "$((10#${sceneId}))" >> "${GITHUB_OUTPUT}"
+            else
+              printf 'scene%s=\n' "$((slot + 1))" >> "${GITHUB_OUTPUT}"
+            fi
+          done
+      - name: "🔁 Retry scene ${{ steps.scene_ids.outputs.scene1 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene1 != '' }}
+        continue-on-error: true
         uses: ./.github/actions/vapour-scene-synth
         with:
-          scene-group: ${{ matrix.sceneGroup }}
+          scene-id: ${{ steps.scene_ids.outputs.scene1 }}
+      - name: "🔁 Retry scene ${{ steps.scene_ids.outputs.scene2 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene2 != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/vapour-scene-synth
+        with:
+          scene-id: ${{ steps.scene_ids.outputs.scene2 }}
+      - name: "🔁 Retry scene ${{ steps.scene_ids.outputs.scene3 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene3 != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/vapour-scene-synth
+        with:
+          scene-id: ${{ steps.scene_ids.outputs.scene3 }}
+      - name: "🔁 Retry scene ${{ steps.scene_ids.outputs.scene4 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene4 != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/vapour-scene-synth
+        with:
+          scene-id: ${{ steps.scene_ids.outputs.scene4 }}
+      - name: "🔁 Retry scene ${{ steps.scene_ids.outputs.scene5 }} — filter, encode, and score"
+        if: ${{ steps.scene_ids.outputs.scene5 != '' }}
+        continue-on-error: true
+        uses: ./.github/actions/vapour-scene-synth
+        with:
+          scene-id: ${{ steps.scene_ids.outputs.scene5 }}
 
   verify-final:
     name: "✅ Verify all remote scene outputs after retry"
@@ -411,39 +458,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: "🧹 Maximize runner space and prepare /data"
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This copy is available from the workflow checkout before /data is mounted.
-          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
-          test -f /data/.maximized.lock
-      - name: "🧰 Install host utilities"
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
-          mkdir -p /data/app/tmp /data/app/videos
-          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
-      - name: "📦 Bootstrap pinned scripts"
-        uses: ./.github/actions/vapour-bootstrap
+      - name: "🧰 Prepare runner with the pinned shared script revision"
+        uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
-      - name: "🧩 Apply validated environment overrides"
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r item; do
-            [[ -z "$item" || "$item" != *=* ]] && continue
-            key="${item%%=*}"; value="${item#*=}"
-            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 1
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
-          done < <(printf '%s' "$CustomEnvs" | tr '|' '\n')
       - name: "📥 Download selected scene manifest"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes
+          name: scene-manifest
           path: /data/app/tmp
       - name: "🔐 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
@@ -467,44 +489,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: "🧹 Maximize runner space and prepare /data"
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This copy is available from the workflow checkout before /data is mounted.
-          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
-          test -f /data/.maximized.lock
-      - name: "🧰 Install host utilities"
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
-          mkdir -p /data/app/tmp /data/app/videos
-          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
-      - name: "📦 Bootstrap pinned scripts"
-        uses: ./.github/actions/vapour-bootstrap
+      - name: "🧰 Prepare runner with the pinned shared script revision"
+        uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
-      - name: "🧩 Apply validated environment overrides"
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r item; do
-            [[ -z "$item" || "$item" != *=* ]] && continue
-            key="${item%%=*}"; value="${item#*=}"
-            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 1
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
-          done < <(printf '%s' "$CustomEnvs" | tr '|' '\n')
       - name: "📥 Download selected scene manifest"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes
+          name: scene-manifest
           path: /data/app/tmp
       - name: "📥 Download original scene manifest"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes-raw
+          name: scene-manifest-raw
           path: /data/app/tmp
       - name: "🔐 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
@@ -598,44 +595,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
-      - name: "🧹 Maximize runner space and prepare /data"
-        shell: bash
-        run: |
-          set -euo pipefail
-          # This copy is available from the workflow checkout before /data is mounted.
-          bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
-          test -f /data/.maximized.lock
-      - name: "🧰 Install host utilities"
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg xz-utils mediainfo git curl python3
-          mkdir -p /data/app/tmp /data/app/videos
-          echo "[+] /data is maximized; .maximized.lock confirms the volume is ready."
-      - name: "📦 Bootstrap pinned scripts"
-        uses: ./.github/actions/vapour-bootstrap
+      - name: "🧰 Prepare runner with the pinned shared script revision"
+        uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
-      - name: "🧩 Apply validated environment overrides"
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS= read -r item; do
-            [[ -z "$item" || "$item" != *=* ]] && continue
-            key="${item%%=*}"; value="${item#*=}"
-            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || exit 1
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
-          done < <(printf '%s' "$CustomEnvs" | tr '|' '\n')
       - name: "📥 Download optimized scene manifest"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes
+          name: scene-manifest
           path: /data/app/tmp
       - name: "📥 Download original scene manifest"
         uses: actions/download-artifact@v4
         with:
-          name: v5o-scenes-raw
+          name: scene-manifest-raw
           path: /data/app/tmp
       - name: "🔐 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
@@ -644,6 +616,6 @@ jobs:
       - name: "🧭 Resolve remote paths"
         working-directory: /data
         run: source /data/scripts/x99.scriptPatcher.sh
-      - name: "🎬 Concatenate encoded scene streams, remux source audio/subtitles, and upload"
+      - name: "🎬 Append encoded scene streams into video-only MKV and upload"
         working-directory: /data
         run: bash /data/scripts/x89.xJoiner.sh

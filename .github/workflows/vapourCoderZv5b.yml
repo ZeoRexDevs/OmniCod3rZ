@@ -46,7 +46,7 @@ on:
         type: boolean
         default: false
       CustomEnvs:
-        description: "Optional pipe-separated KEY=VALUE overrides, e.g. FILTER=false|DENOISE=false"
+        description: "Pipe-separated overrides: FILTER=false|runID4localVS=123456789|runID4SCArt=123456789|runID4Flt=123456789|runID4Art=123456789|runID4SSArt=SELF|runID4ZFile=123456789"
         required: false
         type: string
       ScoreMethod:

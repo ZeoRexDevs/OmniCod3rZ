@@ -1,41 +1,125 @@
-name: "Vapour v5o Scene Synth"
-description: "Processes up to five scene IDs from one matrix cell; scene errors are collected and recovered by the verifier/retry matrix."
+name: "Scene Synthesizer"
+description: "Processes one scene per visible composite-action step: prepare, filter, encode, score, publish, and cleanup."
 inputs:
-  scene-group:
-    description: "Scene IDs joined by '+' (maximum five IDs)."
+  scene-id:
+    description: "One 1-based scene ID. The caller creates up to five visible scene steps per matrix group."
     required: true
 runs:
   using: composite
   steps:
-    - name: "🎬 Encode and score this scene group"
-      id: synth
+    - name: "🧭 Prepare scene ${{ inputs.scene-id }} and check reusable outputs"
+      id: prepare
       shell: bash
       working-directory: /data
       env:
-        SCENE_GROUP: ${{ inputs.scene-group }}
+        SCENE_ID: ${{ inputs.scene-id }}
+      run: bash /data/scripts/x80.sceneWorker.sh prepare "${SCENE_ID}"
+
+
+    - name: "📥 Reuse filtered scene artifact from runID4Flt when supplied"
+      if: env.runID4Flt != '' && steps.prepare.outputs.needs-filter == 'true'
+      continue-on-error: true
+      uses: actions/download-artifact@v4
+      with:
+        name: "${{ env.EpLabel }}.${{ env.VidResH }}p.${{ env.ChunkID }}.ffv1"
+        path: /data/app/artifact/filtered
+        github-token: ${{ env.GH_TOKEN }}
+        run-id: ${{ env.runID4Flt }}
+
+    - name: "📦 Adopt a reusable filtered FFV1 artifact when present"
+      if: env.runID4Flt != ''
+      shell: bash
+      working-directory: /data
       run: |
-        set -uo pipefail
-        IFS='+' read -r -a sceneIds <<< "${SCENE_GROUP}"
-        if (( ${#sceneIds[@]} < 1 || ${#sceneIds[@]} > 5 )); then
-          echo "[!] This matrix cell must contain 1–5 scene IDs; got ${#sceneIds[@]}." >&2
-          exit 1
+        set -euo pipefail
+        if [[ -s "/data/app/artifact/filtered/${FilteredVideoChunk}" ]]; then
+          cp "/data/app/artifact/filtered/${FilteredVideoChunk}" "/data/app/videos/${FilteredVideoChunk}"
+          mkdir -p "${FilteredRemoteDir}"
+          rclone copyto "/data/app/videos/${FilteredVideoChunk}" "${FilteredRemoteDir}/${FilteredVideoChunk}" --retries 8 --retries-sleep 1s
+          echo "[+] Restored and cached filtered scene from prior run."
         fi
-        failed=()
-        for sceneId in "${sceneIds[@]}"; do
-          [[ "${sceneId}" =~ ^[0-9]{1,4}$ ]] || { echo "[!] Invalid scene ID: ${sceneId}" >&2; failed+=("${sceneId}"); continue; }
-          sceneId="$(printf '%04d' "$((10#${sceneId}))")"
-          echo "::group::🎞️ Scene ${sceneId}"
-          if bash /data/scripts/x80.sceneWorker.sh "${sceneId}"; then
-            echo "[+] Scene ${sceneId} completed or was already present."
-          else
-            code=$?
-            echo "[!] Scene ${sceneId} failed with exit code ${code}; continuing with the rest of this group." >&2
-            failed+=("${sceneId}")
+
+    - name: "📥 Try source scene artifact from runID4Art"
+      if: env.runID4Art != '' && steps.prepare.outputs.needs-filter == 'true'
+      continue-on-error: true
+      uses: actions/download-artifact@v4
+      with:
+        name: artifact
+        path: /data/app/artifact/source
+        github-token: ${{ env.GH_TOKEN }}
+        run-id: ${{ env.runID4Art }}
+
+    - name: "📥 Try source scene artifact from runID4SSArt"
+      if: env.runID4SSArt != '' && env.runID4SSArt != 'SELF' && steps.prepare.outputs.needs-filter == 'true'
+      continue-on-error: true
+      uses: actions/download-artifact@v4
+      with:
+        name: artifact
+        path: /data/app/artifact/secondary-source
+        github-token: ${{ env.GH_TOKEN }}
+        run-id: ${{ env.runID4SSArt }}
+
+    - name: "📥 Try same-run source scene artifact when runID4SSArt=SELF"
+      if: env.runID4SSArt == 'SELF' && steps.prepare.outputs.needs-filter == 'true'
+      continue-on-error: true
+      uses: actions/download-artifact@v4
+      with:
+        name: artifact
+        path: /data/app/artifact/secondary-source
+
+    - name: "📦 Adopt a reusable untouched FFV1 scene artifact when present"
+      if: steps.prepare.outputs.needs-filter == 'true' && (env.runID4Art != '' || env.runID4SSArt != '')
+      shell: bash
+      working-directory: /data
+      run: |
+        set -euo pipefail
+        sourceScene="${ShowName}.${EpLabel}.scene.${ChunkID}.ffv1.mkv"
+        for directory in /data/app/artifact/source /data/app/artifact/secondary-source; do
+          if [[ -s "${directory}/${sourceScene}" ]]; then
+            cp "${directory}/${sourceScene}" "/data/app/videos/${sourceScene}"
+            echo "[+] Reused untouched scene artifact: ${sourceScene}"
+            break
           fi
-          echo "::endgroup::"
         done
-        joined="$(IFS=+; echo "${failed[*]}")"
-        echo "failed-scenes=${joined}" >> "${GITHUB_OUTPUT}"
-        if (( ${#failed[@]} > 0 )); then
-          echo "[!] Failed scenes will be determined from remote outputs and retried by a later matrix."
-        fi
+
+    - name: "🧹 Filter scene ${{ inputs.scene-id }} to video-only FFV1 MKV"
+      if: steps.prepare.outputs.needs-filter == 'true'
+      shell: bash
+      working-directory: /data
+      env:
+        SCENE_ID: ${{ inputs.scene-id }}
+      run: bash /data/scripts/x72.ffv1Gen.sh "${SCENE_ID}"
+
+    - name: "🎞️ Encode scene ${{ inputs.scene-id }} to video-only MKV"
+      if: steps.prepare.outputs.needs-encode == 'true'
+      shell: bash
+      working-directory: /data
+      env:
+        SCENE_ID: ${{ inputs.scene-id }}
+      run: bash /data/scripts/x73.vapourGen.sh "${SCENE_ID}"
+
+    - name: "📊 Score scene ${{ inputs.scene-id }} with SSIMU2"
+      if: steps.prepare.outputs.needs-score == 'true'
+      shell: bash
+      working-directory: /data
+      env:
+        SCENE_ID: ${{ inputs.scene-id }}
+      run: bash /data/scripts/x98.sceneScorer.sh "${SCENE_ID}"
+
+    - name: "📤 Publish scene score ${{ inputs.scene-id }}"
+      if: steps.prepare.outputs.needs-score == 'true'
+      shell: bash
+      working-directory: /data
+      run: |
+        set -euo pipefail
+        mkdir -p "${ScoreRemoteDir}"
+        rclone copyto "/data/app/tmp/${ScoreJsonName}" "${ScoreRemoteDir}/${ScoreJsonName}" --retries 8 --retries-sleep 1s
+        echo "[+] Score uploaded: ${ScoreRemoteDir}/${ScoreJsonName}"
+
+    - name: "🧹 Clean local media for scene ${{ inputs.scene-id }}"
+      if: always() && env.KEEP_LOCAL_MEDIA != 'true'
+      shell: bash
+      working-directory: /data
+      env:
+        SCENE_ID: ${{ inputs.scene-id }}
+      run: bash /data/scripts/x80.sceneWorker.sh cleanup "${SCENE_ID}"
