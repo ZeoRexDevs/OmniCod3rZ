@@ -1,6 +1,6 @@
 name: vapourCoderZv5b
 
-run-name: "v5b optimized final - ${{ inputs.Encod3r }} P${{ inputs.EncPreset }} Q${{ inputs.QScale }} - ${{ inputs.EpLabel }} ${{ inputs.ShowName }}"
+run-name: "v5b - ${{ inputs.Encod3r }} P${{ inputs.EncPreset }} Q${{ inputs.QScale }} - ${{ inputs.EpLabel }} ${{ inputs.ShowName }}"
 
 on:
   workflow_dispatch:
@@ -21,15 +21,15 @@ on:
         options: ["SVT", "AOM", "265"]
         default: "SVT"
       EncPreset:
-        description: "Keep the same encoder preset for all four v5a sample runs"
+        description: "Encoder preset for v5b final run"
         required: true
         type: string
-        default: "4"
+        default: "2"
       QScale:
-        description: "Trial QScale/CRF; use four distinct values for v5a, then the same base QScale path for v5b"
+        description: "Optimized QScale/CRF for v5b"
         required: true
-        type: number
-        default: 35
+        type: string
+        default: "35"
       VidRes:
         description: "Output height (720p/1080p) or explicit WxH (1280x720)"
         required: true
@@ -46,7 +46,7 @@ on:
         type: boolean
         default: false
       CustomEnvs:
-        description: "Pipe-separated overrides: FILTER=false|runID4localVS=123456789|runID4SCArt=123456789|runID4Flt=123456789|runID4Art=123456789|runID4SSArt=SELF|runID4ZFile=123456789"
+        description: "Pipe-separated overrides: FILTERGRAPH=false|runID4localVS=123456789|runID4SCArt=123456789|runID4Flt=123456789|runID4Art=123456789|runID4SSArt=SELF|runID4ZFile=123456789"
         required: false
         type: string
       ScoreMethod:

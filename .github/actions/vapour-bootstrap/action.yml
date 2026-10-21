@@ -25,10 +25,6 @@ runs:
           echo "[!] /data/.maximized.lock must exist before cloning the scripts repository." >&2
           exit 1
         }
-        command -v git >/dev/null 2>&1 || {
-          echo "[!] git is required to shallow-clone VapourScriptAddr." >&2
-          exit 1
-        }
 
         # The lock serializes any future bootstrap use on a shared/self-hosted runner.
         exec 9<>/data/.maximized.lock

@@ -21,13 +21,13 @@ on:
         type: string
       QScale:
         required: true
-        type: number
+        type: string
       VidRes:
         required: true
         type: string
       TargetQuality:
         required: false
-        type: number
+        type: string
         default: 70
       ForceRecode:
         required: false
@@ -69,7 +69,7 @@ env:
   RCLONE_CONFIG_HASH: ${{ secrets.RCLONE_CONFIG_HASH }}
   VapourScriptAddr: ${{ vars.VAPOUR_SCRIPT_ADDR }}
   PrimaryGDriveRoot: "gdrive_2tb:"
-  SecondaryGDriveRoot: "gdrive_5th:"
+  SecondaryGDriveRoot: "gdrive_2tb:VapourWorkZ"
   VapourDockerImage: "fr3akyphantom/architect-v3"
   SafeDockerTag: "latest"
   SCENE_GROUP_SIZE: "5"
@@ -97,6 +97,8 @@ jobs:
       - name: "🧰 Prepare runner and install revision-pinned shared scripts"
         id: runner_setup
         uses: ./.github/actions/vapour-runner-setup
+        with:
+          custom-envs: ${{ inputs.CustomEnvs }}
       - name: "🔐 Configure rclone remotes"
         run: bash /data/scripts/x00.rcloneSetup.sh
       - name: "🧭 Resolve remote paths"
@@ -163,15 +165,15 @@ jobs:
         id: matrix
         working-directory: /data
         run: bash /data/scripts/x23.matrixGenZ.sh /data/app/tmp/scenes.json
-      - name: "📥 Reuse a previous runtime artifact when runID4localVS is supplied"
-        if: env.runID4localVS != ''
+      - name: "📥 Reuse a previous runtime artifact before pulling Docker"
+        if: ${{ env.runID4localVS != '' || github.run_attempt > 1 }}
         continue-on-error: true
         uses: actions/download-artifact@v8.0.2
         with:
           name: localVS.tar.gz
           path: /data/
           github-token: ${{ secrets.GH_TOKEN }}
-          run-id: ${{ env.runID4localVS }}
+          run-id: ${{ env.runID4localVS || github.run_id }}
       - name: "🐳 Load cached image/container filesystem if available"
         id: runtime_cache
         shell: bash
@@ -207,6 +209,7 @@ jobs:
         with:
           path: /data/localVS.tar.gz
           archive: false
+          overwrite: true
           retention-days: 6
 
   encode:
@@ -227,6 +230,7 @@ jobs:
         uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
+          custom-envs: ${{ inputs.CustomEnvs }}
       - name: "📥 Download scene manifests"
         uses: actions/download-artifact@v8.0.2
         with:
@@ -326,6 +330,7 @@ jobs:
         uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
+          custom-envs: ${{ inputs.CustomEnvs }}
       - name: "📥 Download the selected scene manifest"
         uses: actions/download-artifact@v8.0.2
         with:
@@ -362,6 +367,7 @@ jobs:
         uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
+          custom-envs: ${{ inputs.CustomEnvs }}
       - name: "📥 Download the selected scene manifest"
         uses: actions/download-artifact@v8.0.2
         with:
@@ -456,6 +462,7 @@ jobs:
         uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
+          custom-envs: ${{ inputs.CustomEnvs }}
       - name: "📥 Download selected scene manifest"
         uses: actions/download-artifact@v8.0.2
         with:
@@ -487,6 +494,7 @@ jobs:
         uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
+          custom-envs: ${{ inputs.CustomEnvs }}
       - name: "📥 Download selected scene manifest"
         uses: actions/download-artifact@v8.0.2
         with:
@@ -593,6 +601,7 @@ jobs:
         uses: ./.github/actions/vapour-runner-setup
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
+          custom-envs: ${{ inputs.CustomEnvs }}
       - name: "📥 Download optimized scene manifest"
         uses: actions/download-artifact@v8.0.2
         with:

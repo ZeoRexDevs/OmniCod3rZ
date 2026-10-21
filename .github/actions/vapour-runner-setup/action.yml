@@ -1,8 +1,12 @@
 name: "Runner and Shared Script Setup"
-description: "Creates /data, clones a revision-pinned script repository, and installs shared host prerequisites."
+description: "Runs the workflow-local /data setup script, then clones shared scripts and installs host prerequisites."
 inputs:
   pinned-rev:
     description: "Optional script repository commit to pin downstream jobs to."
+    required: false
+    default: ""
+  custom-envs:
+    description: "Pipe-separated KEY=VALUE overrides exported before runner initialization."
     required: false
     default: ""
 outputs:
@@ -12,20 +16,43 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: "🧩 Export CustomEnvs before runner initialization"
+      shell: bash
+      env:
+        CUSTOM_ENVS_INPUT: ${{ inputs.custom-envs }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${CUSTOM_ENVS_INPUT:-}" ]]; then
+          echo "[i] No CustomEnvs overrides supplied."
+          exit 0
+        fi
+        while IFS= read -r item; do
+          [[ -z "${item}" || "${item}" != *=* ]] && continue
+          key="${item%%=*}"
+          value="${item#*=}"
+          [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+            echo "[!] Invalid CustomEnvs key: ${key}" >&2
+            # exit 1
+          }
+          [[ "${value}" != *$'\n'* && "${value}" != *$'\r'* ]] || {
+            echo "[!] Multi-line CustomEnvs values are not supported." >&2
+            # exit 1
+          }
+          printf '%s=%s\n' "${key}" "${value}" >> "${GITHUB_ENV}"
+        done < <(printf '%s\n' "${CUSTOM_ENVS_INPUT}" | tr '|' '\n')
     - name: "🧹 Maximize space and create /data lockfile"
       shell: bash
       run: |
         set -euo pipefail
-        bash "${GITHUB_WORKSPACE}/scripts/x02.maximizeSpace.sh"
+        bash "${GITHUB_WORKSPACE}/.maximizeSpace.sh"
         test -f /data/.maximized.lock
     - name: "📦 Shallow-clone the pinned shared scripts"
       id: bootstrap
       uses: ./.github/actions/vapour-bootstrap
       with:
         pinned-rev: ${{ inputs.pinned-rev }}
-    - name: "🧰 Install host utilities"
+    - name: "🧰 Install host media utilities"
       shell: bash
-      run: bash /data/scripts/x03.workflowSetup.sh host-utils
-    - name: "🧩 Apply validated environment overrides"
-      shell: bash
-      run: bash /data/scripts/x03.workflowSetup.sh custom-envs
+      run: bash /data/scripts/x03.workflowSetup.sh
+
