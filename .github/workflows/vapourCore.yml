@@ -68,8 +68,8 @@ env:
   GH_TOKEN: ${{ secrets.GH_TOKEN }}
   RCLONE_CONFIG_HASH: ${{ secrets.RCLONE_CONFIG_HASH }}
   VapourScriptAddr: ${{ vars.VAPOUR_SCRIPT_ADDR }}
-  PrimaryGDriveRoot: "ms365:"
-  SecondaryGDriveRoot: "gdrive_2tb:"
+  PrimaryGDriveRoot: "gdrive_2tb:"
+  SecondaryGDriveRoot: "gdrive_5th:"
   VapourDockerImage: "fr3akyphantom/architect-v3"
   SafeDockerTag: "latest"
   SCENE_GROUP_SIZE: "5"
@@ -77,7 +77,7 @@ env:
 jobs:
   prepare:
     name: "🧰 Prepare scene manifest and cache runtime image"
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       matrixJobCount: ${{ steps.meta.outputs.matrixJobCount }}
@@ -91,7 +91,7 @@ jobs:
       scriptRev: ${{ steps.runner_setup.outputs.rev }}
     steps:
       - name: "📥 Checkout workflow revision"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: "🧰 Prepare runner and install revision-pinned shared scripts"
@@ -105,7 +105,7 @@ jobs:
       - name: "📥 Reuse a previous scene-manifest artifact when runID4SCArt is supplied"
         if: env.runID4SCArt != ''
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scenejson
           path: /data/app/tmp/previous-scene
@@ -114,7 +114,7 @@ jobs:
       - name: "📥 Reuse a previous zonefile artifact when runID4ZFile is supplied"
         if: env.runID4ZFile != '' && inputs.Mode == 'final'
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: Zonefile
           path: /data/app/tmp/previous-zone
@@ -166,9 +166,9 @@ jobs:
       - name: "📥 Reuse a previous runtime artifact when runID4localVS is supplied"
         if: env.runID4localVS != ''
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
-          name: localVS
+          name: localVS.tar.gz
           path: /data/
           github-token: ${{ secrets.GH_TOKEN }}
           run-id: ${{ env.runID4localVS }}
@@ -178,7 +178,7 @@ jobs:
         run: bash /data/scripts/x54.runtimeCache.sh restore
       - name: "🐳 Login to Docker Hub"
         if: steps.runtime_cache.outputs.loaded != 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -189,38 +189,30 @@ jobs:
         shell: bash
         run: bash /data/scripts/x54.runtimeCache.sh save
       - name: "📤 Upload revision-pinned scene manifests"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: scene-manifest
           path: /data/app/tmp/scenes.json
           retention-days: 3
           compression-level: 0
       - name: "📤 Upload original scene manifest"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: scene-manifest-raw
           path: /data/app/tmp/scenes.raw.json
           retention-days: 3
           compression-level: 0
-      - name: "📤 Cache runtime Docker image as workflow artifact"
-        uses: actions/upload-artifact@v4
+      - name: "📤 Keep runtime cache file for reuse by later runs"
+        uses: actions/upload-artifact@v7.0.2
         with:
-          name: runtime-image
-          path: /data/app/tmp/runtime-image.tar.gz
-          retention-days: 1
-          compression-level: 0
-      - name: "📤 Keep runtime cache for reuse by later runs"
-        uses: actions/upload-artifact@v4
-        with:
-          name: localVS
           path: /data/localVS.tar.gz
+          archive: false
           retention-days: 6
-          compression-level: 0
 
   encode:
     name: "🎞️ Encode and SSIMU2-score scene group ${{ matrix.sceneGroup }}"
     needs: prepare
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 16
@@ -228,7 +220,7 @@ jobs:
         sceneGroup: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - name: "📥 Checkout workflow revision"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: "🧰 Prepare runner with the pinned shared script revision"
@@ -236,12 +228,12 @@ jobs:
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
       - name: "📥 Download scene manifests"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest
           path: /data/app/tmp
       - name: "📥 Download original scene manifest"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest-raw
           path: /data/app/tmp
@@ -252,13 +244,14 @@ jobs:
       - name: "🧭 Resolve scene / remote paths"
         working-directory: /data
         run: source /data/scripts/x99.scriptPatcher.sh
-      - name: "📥 Download cached runtime image"
-        uses: actions/download-artifact@v4
+      - name: "📥 Download the single localVS Docker snapshot"
+        uses: actions/download-artifact@v8.0.2
         with:
-          name: runtime-image
-          path: /tmp/runtime-image-cache
-      - name: "🐳 Load cached runtime image"
-        run: gzip -dc /tmp/runtime-image-cache/runtime-image.tar.gz | docker load
+          name: localVS.tar.gz
+          path: /data/
+      - name: "🐳 Restore the localVS Docker snapshot"
+        id: runtime_cache
+        run: bash /data/scripts/x54.runtimeCache.sh restore
       - name: "🐳 Start scene worker container"
         working-directory: /data
         run: source /data/scripts/x53.dockerPrep.sh
@@ -320,13 +313,13 @@ jobs:
     name: "🔍 Inspect remote scene outputs after first matrix"
     needs: [prepare, encode]
     if: ${{ always() && needs.prepare.result == 'success' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       missingCount: ${{ steps.verify.outputs.missingCount }}
       retryMatrix: ${{ steps.verify.outputs.retryMatrix }}
     steps:
       - name: "📥 Checkout workflow revision"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: "🧰 Prepare runner with the pinned shared script revision"
@@ -334,7 +327,7 @@ jobs:
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
       - name: "📥 Download the selected scene manifest"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest
           path: /data/app/tmp
@@ -354,7 +347,7 @@ jobs:
     name: "🔁 Retry only missing scenes, keeping original group buckets"
     needs: [prepare, inspect-initial]
     if: ${{ always() && needs.prepare.result == 'success' && needs.inspect-initial.result == 'success' && needs.inspect-initial.outputs.missingCount != '0' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       max-parallel: 16
@@ -362,7 +355,7 @@ jobs:
         sceneGroup: ${{ fromJSON(needs.inspect-initial.outputs.retryMatrix) }}
     steps:
       - name: "📥 Checkout workflow revision"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: "🧰 Prepare runner with the pinned shared script revision"
@@ -370,7 +363,7 @@ jobs:
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
       - name: "📥 Download the selected scene manifest"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest
           path: /data/app/tmp
@@ -381,13 +374,14 @@ jobs:
       - name: "🧭 Resolve scene paths"
         working-directory: /data
         run: source /data/scripts/x99.scriptPatcher.sh
-      - name: "📥 Download cached runtime image"
-        uses: actions/download-artifact@v4
+      - name: "📥 Download the single localVS Docker snapshot"
+        uses: actions/download-artifact@v8.0.2
         with:
-          name: runtime-image
-          path: /tmp/runtime-image-cache
-      - name: "🐳 Load cached runtime image"
-        run: gzip -dc /tmp/runtime-image-cache/runtime-image.tar.gz | docker load
+          name: localVS.tar.gz
+          path: /data/
+      - name: "🐳 Restore the localVS Docker snapshot"
+        id: runtime_cache
+        run: bash /data/scripts/x54.runtimeCache.sh restore
       - name: "🐳 Start scene worker container"
         working-directory: /data
         run: source /data/scripts/x53.dockerPrep.sh
@@ -449,13 +443,13 @@ jobs:
     name: "✅ Verify all remote scene outputs after retry"
     needs: [prepare, encode, inspect-initial, retry]
     if: ${{ always() && needs.prepare.result == 'success' && needs.inspect-initial.result == 'success' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       missingCount: ${{ steps.verify.outputs.missingCount }}
       retryMatrix: ${{ steps.verify.outputs.retryMatrix }}
     steps:
       - name: "📥 Checkout workflow revision"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: "🧰 Prepare runner with the pinned shared script revision"
@@ -463,7 +457,7 @@ jobs:
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
       - name: "📥 Download selected scene manifest"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest
           path: /data/app/tmp
@@ -483,10 +477,10 @@ jobs:
     name: "📊 Aggregate scene scores and optimize v5a / report v5b diff"
     needs: [prepare, verify-final]
     if: ${{ always() && needs.prepare.result == 'success' && needs.verify-final.result == 'success' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: "📥 Checkout workflow revision"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: "🧰 Prepare runner with the pinned shared script revision"
@@ -494,12 +488,12 @@ jobs:
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
       - name: "📥 Download selected scene manifest"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest
           path: /data/app/tmp
       - name: "📥 Download original scene manifest"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest-raw
           path: /data/app/tmp
@@ -589,10 +583,10 @@ jobs:
     name: "🎞️ Merge encoded scenes and upload final video to Primary GDrive"
     needs: [prepare, verify-final, aggregate]
     if: ${{ inputs.Mode == 'final' && needs.prepare.result == 'success' && needs.verify-final.result == 'success' && needs.verify-final.outputs.missingCount == '0' && needs.aggregate.result == 'success' }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: "📥 Checkout workflow revision"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.sha }}
       - name: "🧰 Prepare runner with the pinned shared script revision"
@@ -600,12 +594,12 @@ jobs:
         with:
           pinned-rev: ${{ needs.prepare.outputs.scriptRev }}
       - name: "📥 Download optimized scene manifest"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest
           path: /data/app/tmp
       - name: "📥 Download original scene manifest"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8.0.2
         with:
           name: scene-manifest-raw
           path: /data/app/tmp

@@ -19,7 +19,7 @@ runs:
     - name: "📥 Reuse filtered scene artifact from runID4Flt when supplied"
       if: env.runID4Flt != '' && steps.prepare.outputs.needs-filter == 'true'
       continue-on-error: true
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8.0.2
       with:
         name: "${{ env.EpLabel }}.${{ env.VidResH }}p.${{ env.ChunkID }}.ffv1"
         path: /data/app/artifact/filtered
@@ -42,7 +42,7 @@ runs:
     - name: "📥 Try source scene artifact from runID4Art"
       if: env.runID4Art != '' && steps.prepare.outputs.needs-filter == 'true'
       continue-on-error: true
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8.0.2
       with:
         name: artifact
         path: /data/app/artifact/source
@@ -52,7 +52,7 @@ runs:
     - name: "📥 Try source scene artifact from runID4SSArt"
       if: env.runID4SSArt != '' && env.runID4SSArt != 'SELF' && steps.prepare.outputs.needs-filter == 'true'
       continue-on-error: true
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8.0.2
       with:
         name: artifact
         path: /data/app/artifact/secondary-source
@@ -62,7 +62,7 @@ runs:
     - name: "📥 Try same-run source scene artifact when runID4SSArt=SELF"
       if: env.runID4SSArt == 'SELF' && steps.prepare.outputs.needs-filter == 'true'
       continue-on-error: true
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8.0.2
       with:
         name: artifact
         path: /data/app/artifact/secondary-source
